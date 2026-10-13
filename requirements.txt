@@ -1,0 +1,7 @@
+vk_api
+requests
+beautifulsoup4
+lxml
+feedparser
+apscheduler
+python-dotenv
