@@ -303,4 +303,5 @@ class NotificationBot:
 
 if __name__ == "__main__":
     bot = NotificationBot()
+    bot.process_news()  # <-- временно, для проверки
     bot.run()
