@@ -61,7 +61,7 @@ class NotificationBot:
                 "опасность", "тревога", "БПЛА",
             ],
         )
-        self.sevsu_site = SevSUParser("https://www.sevsu.ru/news/")
+        self.sevsu_site = SevSUParser("https://www.sevsu.ru/novosti/")
         self.sevsu_vk = VKNewsParser(VK_TOKEN, "sevsu")
 
         # Состояние тревоги (чтобы не дублировать отбой)
