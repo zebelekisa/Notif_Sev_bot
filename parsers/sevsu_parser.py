@@ -1,87 +1,73 @@
 # parsers/sevsu_parser.py
-import requests
-from bs4 import BeautifulSoup
+import re
+import html as html_lib
+import feedparser
 from typing import List, Dict
 import logging
 
 logger = logging.getLogger(__name__)
 
 
+def strip_html(text: str) -> str:
+    """Убирает HTML-теги и раскодирует сущности (&nbsp;, &amp; и т.п.)."""
+    if not text:
+        return ""
+    # Раскодируем HTML-сущности
+    text = html_lib.unescape(text)
+    # Убираем теги
+    text = re.sub(r"<[^>]+>", "", text)
+    # Сжимаем пробелы
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 class SevSUParser:
-    """Парсер новостей с сайта СевГУ (страница /novosti/)."""
+    """Парсер новостей СевГУ через RSS-ленту Битрикса."""
 
-    BASE_URL = "https://www.sevsu.ru"
-
-    def __init__(self, news_url: str = "https://www.sevsu.ru/novosti/"):
-        self.news_url = news_url
-        self._last_news_titles = set()
+    def __init__(self, rss_url: str = "https://www.sevsu.ru/novosti/rss.php?section=0"):
+        self.rss_url = rss_url
+        self._last_news_links = set()
 
     def fetch_news(self) -> List[Dict]:
         try:
-            resp = requests.get(
-                self.news_url,
-                timeout=15,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; SevSU-Bot/1.0)"},
-            )
-            resp.raise_for_status()
+            feed = feedparser.parse(self.rss_url)
         except Exception as e:
-            logger.error(f"Ошибка загрузки новостей СевГУ: {e}")
+            logger.error(f"Ошибка парсинга RSS СевГУ: {e}")
             return []
 
-        soup = BeautifulSoup(resp.text, "lxml")
+        if not feed.entries:
+            logger.warning(f"[SevSUParser] RSS пуст или недоступен: {self.rss_url}")
+            return []
 
-        # ... внутри fetch_news после soup = BeautifulSoup(...)        
-        # 1. Сколько блоков нашлось каждым селектором отдельно
-        print(f"[DEBUG] div.page-news: {len(soup.select('div.page-news'))}")
-        print(f"[DEBUG] a.page-news__title: {len(soup.select('a.page-news__title'))}")
-        print(f"[DEBUG] .page-news__content: {len(soup.select('.page-news__content'))}")
-        # 2. Что вообще в HTML
-        print(f"[DEBUG] Длина HTML: {len(resp.text)}")
-        print(f"[DEBUG] Первые 300 символов: {resp.text[:300]}")
-        print(f"[DEBUG] Содержит 'page-news': {'page-news' in resp.text}")
-
-        # Основная лента новостей — блоки div.page-news (слайдер игнорируем)
-        news_blocks = soup.select("div.page-news")
-        logger.info(f"[SevSUParser] Найдено блоков новостей: {len(news_blocks)}")
+        logger.info(f"[SevSUParser] Найдено новостей в RSS: {len(feed.entries)}")
 
         news_items = []
-        for block in news_blocks:
-            # Заголовок и ссылка
-            title_el = block.select_one("a.page-news__title")
-            if not title_el:
+        for entry in feed.entries:
+            link = entry.get("link", "")
+            if not link or link in self._last_news_links:
                 continue
 
-            title = title_el.get_text(strip=True)
-            link = title_el.get("href", "")
-            if link and not link.startswith("http"):
-                link = self.BASE_URL + link
+            title = entry.get("title", "").strip()
+            description = strip_html(entry.get("description", ""))
+            date = entry.get("published", "")
+            category = entry.get("category", "")
 
-            # Категория (Жизнь СевГУ, Новости СевГУ, Анонсы и т.д.)
-            type_el = block.select_one(".page-news__type")
-            category = type_el.get_text(strip=True) if type_el else ""
-
-            # Краткое описание
-            desc_el = block.select_one(".page-news__content p")
-            description = desc_el.get_text(strip=True) if desc_el else ""
-
-            # Дата
-            date_el = block.select_one(".page-news__info time")
-            date_text = date_el.get_text(" ", strip=True) if date_el else ""
-
-            if title in self._last_news_titles:
-                continue
+            # Категория в RSS СевГУ длинная: "Институт/Кафедра".
+            # Для бота оставляем только институт.
+            if category and "/" in category:
+                category = category.split("/")[0].strip()
 
             news_items.append({
                 "title": title,
                 "link": link,
                 "description": description,
+                "date": date,
                 "category": category,
-                "date": date_text,
                 "source": "СевГУ",
             })
 
-        # Обновляем кэш, чтобы не дублировать
+        # Запоминаем, чтобы не дублировать
         for n in news_items:
-            self._last_news_titles.add(n["title"])
+            self._last_news_links.add(n["link"])
 
         return news_items
