@@ -18,7 +18,7 @@ print(f"[config] GROUP_ID={GROUP_ID}, token starts with {VK_TOKEN[:10]}...")
 
 # Источники
 MCHS_RSS_URL = "https://92.mchs.gov.ru/rss"  # RSS МЧС по Севастополю
-SEVSU_NEWS_URL = "https://www.sevsu.ru/news/"
+SEVSU_NEWS_URL = "https://www.sevsu.ru/novosti/"
 SEVSU_VK_GROUP = "sevsu"  # короткое имя сообщества
 
 # Ключевые слова для фильтрации тревог
