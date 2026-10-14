@@ -30,6 +30,16 @@ class SevSUParser:
 
         soup = BeautifulSoup(resp.text, "lxml")
 
+        # ... внутри fetch_news после soup = BeautifulSoup(...)        
+        # 1. Сколько блоков нашлось каждым селектором отдельно
+        print(f"[DEBUG] div.page-news: {len(soup.select('div.page-news'))}")
+        print(f"[DEBUG] a.page-news__title: {len(soup.select('a.page-news__title'))}")
+        print(f"[DEBUG] .page-news__content: {len(soup.select('.page-news__content'))}")
+        # 2. Что вообще в HTML
+        print(f"[DEBUG] Длина HTML: {len(resp.text)}")
+        print(f"[DEBUG] Первые 300 символов: {resp.text[:300]}")
+        print(f"[DEBUG] Содержит 'page-news': {'page-news' in resp.text}")
+
         # Основная лента новостей — блоки div.page-news (слайдер игнорируем)
         news_blocks = soup.select("div.page-news")
         logger.info(f"[SevSUParser] Найдено блоков новостей: {len(news_blocks)}")
