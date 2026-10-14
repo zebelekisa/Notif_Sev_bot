@@ -22,8 +22,16 @@ class SevSUParser:
             logger.error(f"Ошибка загрузки новостей СевГУ: {e}")
             return []
 
+        # ▼▼▼ ВСТАВИТЬ ЗДЕСЬ — первая строка диагностики ▼▼▼
+        print(f"[SevSUParser] HTTP {resp.status_code}, длина HTML: {len(resp.text)}")
+        # ▲▲▲ конец первой вставки ▲▲▲
+
         soup = BeautifulSoup(resp.text, "lxml")
         news_items = []
+
+        # ▼▼▼ ВСТАВИТЬ ЗДЕСЬ — вторая строка диагностики ▼▼▼
+        print(f"[SevSUParser] Найдено элементов: {len(soup.select('.news-item, .news-list-item, article'))}")
+        # ▲▲▲ конец второй вставки ▲▲▲
 
         # Селекторы зависят от текущей вёрстки сайта sevsu.ru.
         # Ниже — типовой вариант; при необходимости скорректируйте.
