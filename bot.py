@@ -118,20 +118,37 @@ class NotificationBot:
 
     # ---------- Обработка новостей ----------
     def process_news(self):
-        # Новости из VK (приоритетный источник)
+        # 1. Пробуем VK API
         news = self.sevsu_vk.fetch_news(count=3)
+        logger.info(f"[process_news] VK API вернул {len(news)} постов")
+    
+        # 2. Если пусто — парсим сайт
         if not news:
-            # Fallback: парсинг сайта
             news = self.sevsu_site.fetch_news()
-
-        for item in news:
-            text = (
-                f"📰 **Новости СевГУ**\n\n"
-                f"{item.get('title', item.get('text', ''))[:400]}\n\n"
-                f"🔗 {item.get('link', '')}"
-            )
+            logger.info(f"[process_news] Сайт вернул {len(news)} новостей")
+    
+        if not news:
+            logger.warning("[process_news] Новостей нет ни из VK, ни с сайта")
+            return
+    
+        for item in news[:3]:
+            title = item.get("title") or item.get("text", "")[:100]
+            link = item.get("link", "")
+            category = item.get("category", "")
+            date = item.get("date", "")
+    
+            header = "📰 Новости СевГУ"
+            if category:
+                header += f" · {category}"
+    
+            text = f"{header}\n\n{title}"
+            if date:
+                text += f"\n\n🗓 {date}"
+            if link:
+                text += f"\n🔗 {link}"
+    
             self.broadcast(text, only_news=True)
-            logger.info(f"Отправлена новость: {item.get('title', '')[:60]}")
+            logger.info(f"Отправлена новость: {title[:60]}")
 
     # ---------- Обработка команд от пользователей ----------
     def handle_message(self, event):
