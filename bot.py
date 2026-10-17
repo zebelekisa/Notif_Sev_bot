@@ -7,9 +7,9 @@ from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
 from apscheduler.schedulers.background import BackgroundScheduler
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 
-from config import VK_TOKEN, GROUP_ID, BROADCAST_PEER_ID, CHECK_INTERVAL_MINUTES
-from parsers.mchs_parser import MCHSParser
+from config import VK_TOKEN, GROUP_ID, BROADCAST_PEER_ID, CHECK_INTERVAL_MINUTES, ALERT_KEYWORDS, PHOTO_ALERT_ID, PHOTO_CLEAR_ID
 from parsers.sevsu_parser import SevSUParser
+from parsers.governor_parser import GovernorParser
 from storage.db import Storage
 
 logging.basicConfig(
@@ -36,6 +36,10 @@ def get_settings_keyboard():
     keyboard.add_line()
     keyboard.add_button("📨 Новости: вкл/выкл", color=VkKeyboardColor.SECONDARY)
     keyboard.add_line()
+    keyboard.add_button("🧪 Тест тревог (Губернатор)", color=VkKeyboardColor.SECONDARY)
+    keyboard.add_line()
+    keyboard.add_button("🗑 Очистить новости", color=VkKeyboardColor.NEGATIVE)
+    keyboard.add_line()
     keyboard.add_button("⬅️ Назад", color=VkKeyboardColor.NEGATIVE)
     return keyboard.get_keyboard()
 
@@ -56,21 +60,14 @@ class NotificationBot:
         self.storage = Storage()
 
         # Парсеры
-        self.mchs = MCHSParser(
-            rss_url="https://92.mchs.gov.ru/rss",
-            keywords=[
-                "воздушная тревога", "ракетная опасность", "отбой",
-                "опасность", "тревога", "БПЛА",
-            ],
+        self.sevsu_site = SevSUParser(
+            "https://www.sevsu.ru/novosti/rss.php?section=0",
+            storage=self.storage,
         )
-        self.sevsu_site = SevSUParser("https://www.sevsu.ru/novosti/rss.php?section=0")
-
-        # Состояние тревоги
-        self.current_alert_state = None  # None | "alert" | "all_clear"
+        self.governor_parser = GovernorParser()
 
     # ---------- Отправка ----------
-    def send_message(self, peer_id: int, text: str, keyboard: dict = None):
-        """Отправляет сообщение. keyboard — либо словарь, либо None (без клавы)."""
+    def send_message(self, peer_id: int, text: str, keyboard: dict = None) -> bool:
         try:
             self.vk.messages.send(
                 peer_id=peer_id,
@@ -78,47 +75,23 @@ class NotificationBot:
                 keyboard=keyboard if keyboard is not None else get_empty_keyboard(),
                 random_id=int(time.time() * 1000),
             )
+            return True
         except Exception as e:
             logger.error(f"Ошибка отправки в {peer_id}: {e}")
+            return False
 
-    def broadcast(self, text: str, only_alerts: bool = False, only_news: bool = False):
-        """Рассылка в беседу."""
+    def broadcast(self, text: str, only_alerts: bool = False, only_news: bool = False) -> bool:
         if BROADCAST_PEER_ID:
-            self.send_message(BROADCAST_PEER_ID, text)
-
-    # ---------- Обработка тревог ----------
-    def process_alerts(self):
-        alerts = self.mchs.fetch_alerts()
-        for alert in alerts:
-            guid = alert["guid"]
-            if self.storage.is_alert_sent(guid):
-                continue
-
-            text = (
-                f"🚨 **{alert['title']}**\n\n"
-                f"{alert['summary'][:500]}\n\n"
-                f"🔗 {alert['link']}"
-            )
-
-            full = (alert["title"] + " " + alert["summary"]).lower()
-            if "отбой" in full and self.current_alert_state == "alert":
-                self.current_alert_state = "all_clear"
-                text = "✅ **ОТБОЙ ВОЗДУШНОЙ ТРЕВОГИ**\n\n" + text
-            elif any(kw in full for kw in ["воздушная тревога", "ракетная опасность"]):
-                self.current_alert_state = "alert"
-                text = "🚨 **ВОЗДУШНАЯ ТРЕВОГА!**\n\n" + text
-
-            self.broadcast(text, only_alerts=True)
-            self.storage.mark_alert_sent(guid)
-            logger.info(f"Отправлено оповещение: {alert['title']}")
+            return self.send_message(BROADCAST_PEER_ID, text)
+        return False
 
     # ---------- Обработка новостей ----------
     def process_news(self):
-        news = self.sevsu_site.fetch_news()
-        logger.info(f"[process_news] RSS вернул {len(news)} новостей")
+        news = self.sevsu_site.fetch_news(skip_sent=True)
+        logger.info(f"[process_news] Новых новостей: {len(news)}")
 
         if not news:
-            logger.warning("[process_news] Новостей нет")
+            logger.info("[process_news] Нечего рассылать")
             return
 
         for item in news[:3]:
@@ -134,7 +107,6 @@ class NotificationBot:
 
             text = f"{header}\n\n**{title}**"
             if description:
-                # Обрезаем до 300 символов
                 text += f"\n\n{description[:300]}"
                 if len(description) > 300:
                     text += "..."
@@ -143,8 +115,9 @@ class NotificationBot:
             if link:
                 text += f"\n🔗 {link}"
 
-            self.broadcast(text, only_news=True)
-            logger.info(f"Отправлена новость: {title[:60]}")
+            if self.broadcast(text, only_news=True):
+                self.storage.mark_news_sent(link)
+                logger.info(f"Отправлена новость: {title[:60]}")
 
     # ---------- Обработка команд ----------
     def handle_message(self, event):
@@ -163,26 +136,91 @@ class NotificationBot:
             )
             return
 
+        # === ТЕСТОВЫЙ РЕЖИМ ТРЕВОГ ===
+        if text.lower() == "/test_alerts" or text == "🧪 Тест тревог (Губернатор)":
+            self.send_message(peer_id, "⏳ Загружаю последние посты губернатора и ищу тревоги...")
+            posts = self.governor_parser.fetch_all_recent(limit=30)
+            
+            if not posts:
+                self.send_message(peer_id, "⚠️ Не удалось загрузить посты.")
+                return
+                
+            alerts_found = 0
+            report = ["🧪 РЕЗУЛЬТАТЫ ТЕСТА ТРЕВОГ (последние 30 постов):\n"] 
+            
+            for p in posts:
+                post_text = p.get("text", "")
+                post_id = p.get("id")
+                post_date = p.get("date")
+                post_photos = p.get("photos", [])
+                
+                # 1. Ищем по ключевым словам в тексте
+                matched_keywords = [kw for kw in ALERT_KEYWORDS if kw.lower() in post_text.lower()]
+                
+                # 2. Ищем по ID картинок
+                has_alert_photo = PHOTO_ALERT_ID in post_photos
+                has_clear_photo = PHOTO_CLEAR_ID in post_photos
+                
+                # Если нашли текст ИЛИ нужную картинку
+                if matched_keywords or has_alert_photo or has_clear_photo:
+                    alerts_found += 1
+                    
+                    triggers = []
+                    if matched_keywords:
+                        triggers.append(f"текст ({', '.join(matched_keywords)})")
+                    if has_alert_photo:
+                        triggers.append("картинка (Тревога)")
+                    if has_clear_photo:
+                        triggers.append("картинка (Отбой)")
+                        
+                    short_text = post_text[:80].replace("\n", " ")
+                    if not short_text:
+                        short_text = "[Пост без текста, только картинка]"
+                    else:
+                        short_text += "..."
+                        
+                    report.append(
+                        f"🚨 [{post_date}] (ID: {post_id})\n"
+                        f"🔍 Триггер: {', '.join(triggers)}\n"
+                        f"📝 {short_text}\n"
+                    )
+            
+            if alerts_found == 0:
+                report.append("✅ В последних 30 постах тревог не найдено.")
+            else:
+                report.append(f"Всего найдено постов с триггерами: {alerts_found}")
+                
+            final_msg = "\n".join(report)
+            if len(final_msg) > 4000:
+                final_msg = final_msg[:4000] + "\n... (сообщение обрезано)"
+                
+            self.send_message(peer_id, final_msg, keyboard=get_main_keyboard())
+            return
+
         # === Статус тревоги ===
         if text == "🚨 Статус тревоги":
-            if self.current_alert_state == "alert":
-                msg = "🚨 Сейчас в Севастополе действует воздушная тревога!"
-            else:
-                msg = "✅ Воздушная тревога не объявлена."
-            self.send_message(peer_id, msg, keyboard=get_main_keyboard())
+            self.send_message(peer_id, "✅ Воздушная тревога не объявлена.\n\n"
+                "ℹ️ Функция в разработке: подключение к оперативному источнику тревог.",
+                keyboard=get_main_keyboard(),
+            )
             return
 
         # === Новости ===
         if text == "📰 Новости":
-            news = self.sevsu_site.fetch_news()
+            # Запрашиваем ТОЛЬКО те новости, которых нет в БД
+            news = self.sevsu_site.fetch_news(skip_sent=True)
+            
             if not news:
-                msg = "Пока новостей нет."
+                msg = "Пока новых новостей нет. Все актуальные новости уже показаны."
+                self.send_message(peer_id, msg, keyboard=get_main_keyboard())
             else:
-                parts = ["📰 Последние новости СевГУ:\n"]
                 for n in news[:3]:
-                    parts.append(f"• {n.get('title', '')[:120]}\n{n.get('link', '')}")
-                msg = "\n\n".join(parts)
-            self.send_message(peer_id, msg, keyboard=get_main_keyboard())
+                    title = n.get('title', '')[:120]
+                    link = n.get('link', '')
+                    msg = f"📰 Новость СевГУ:\n\n{title}\n{link}"
+                    
+                    if self.send_message(peer_id, msg, keyboard=get_main_keyboard()):
+                        self.storage.mark_news_sent(link)
             return
 
         # === Памятка ===
@@ -223,11 +261,7 @@ class NotificationBot:
             )
             self.storage.conn.commit()
             state = "включены ✅" if new_val else "выключены 🔕"
-            self.send_message(
-                peer_id,
-                f"Уведомления о тревогах {state}.",
-                keyboard=get_settings_keyboard(),
-            )
+            self.send_message(peer_id, f"Уведомления о тревогах {state}.", keyboard=get_settings_keyboard())
             return
 
         # === Тумблер новостей ===
@@ -242,9 +276,16 @@ class NotificationBot:
             )
             self.storage.conn.commit()
             state = "включены ✅" if new_val else "выключены 🔕"
+            self.send_message(peer_id, f"Уведомления о новостях {state}.", keyboard=get_settings_keyboard())
+            return
+
+        # === Очистка новостей ===
+        if text == "🗑 Очистить новости":
+            count = self.storage.clear_sent_news()
             self.send_message(
                 peer_id,
-                f"Уведомления о новостях {state}.",
+                f"🗑 История отправленных новостей очищена (удалено записей: {count}).\n"
+                "При следующем нажатии на «📰 Новости» они будут показаны снова.",
                 keyboard=get_settings_keyboard(),
             )
             return
@@ -257,7 +298,6 @@ class NotificationBot:
     # ---------- Основной цикл ----------
     def run(self):
         scheduler = BackgroundScheduler()
-        scheduler.add_job(self.process_alerts, "interval", minutes=CHECK_INTERVAL_MINUTES)
         scheduler.add_job(self.process_news, "interval", minutes=30)
         scheduler.start()
         logger.info("Планировщик запущен. Проверка каждые %s мин.", CHECK_INTERVAL_MINUTES)

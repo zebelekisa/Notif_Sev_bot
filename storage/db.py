@@ -1,9 +1,6 @@
 # storage/db.py
 import sqlite3
-import json
-from datetime import datetime
-from typing import Optional, List, Dict
-
+from typing import Dict
 
 class Storage:
     def __init__(self, db_path: str = "bot.db"):
@@ -33,8 +30,14 @@ class Storage:
             CREATE TABLE IF NOT EXISTS student_status (
                 user_id INTEGER PRIMARY KEY,
                 peer_id INTEGER,
-                status TEXT,              -- 'safe', 'need_help', 'unknown'
+                status TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS sent_news (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                link TEXT UNIQUE,
+                sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
         self.conn.commit()
@@ -71,7 +74,7 @@ class Storage:
         cur.execute(query)
         return cur.fetchall()
 
-    # --- статус студентов (для подсчёта во время тревоги) ---
+    # --- статус студентов ---
     def set_status(self, user_id: int, peer_id: int, status: str):
         cur = self.conn.cursor()
         cur.execute("""
@@ -82,7 +85,30 @@ class Storage:
 
     def count_by_status(self) -> Dict[str, int]:
         cur = self.conn.cursor()
-        cur.execute("""
-            SELECT status, COUNT(*) FROM student_status GROUP BY status
-        """)
+        cur.execute("SELECT status, COUNT(*) FROM student_status GROUP BY status")
         return dict(cur.fetchall())
+
+    # --- новости ---
+    def is_news_sent(self, link: str) -> bool:
+        if not link:
+            return False
+        cur = self.conn.cursor()
+        cur.execute("SELECT 1 FROM sent_news WHERE link = ?", (link,))
+        return cur.fetchone() is not None
+
+    def mark_news_sent(self, link: str):
+        if not link:
+            return
+        self.conn.execute("INSERT OR IGNORE INTO sent_news (link) VALUES (?)", (link,))
+        self.conn.commit()
+
+    def get_sent_news_links(self) -> set:
+        cur = self.conn.cursor()
+        cur.execute("SELECT link FROM sent_news")
+        return {row[0] for row in cur.fetchall()}
+
+    def clear_sent_news(self) -> int:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM sent_news")
+        self.conn.commit()
+        return cur.rowcount

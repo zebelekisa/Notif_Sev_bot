@@ -24,11 +24,12 @@ def strip_html(text: str) -> str:
 class SevSUParser:
     """Парсер новостей СевГУ через RSS-ленту Битрикса."""
 
-    def __init__(self, rss_url: str = "https://www.sevsu.ru/novosti/rss.php?section=0"):
+    def __init__(self, rss_url: str = "https://www.sevsu.ru/novosti/rss.php?section=0",
+                 storage=None):
         self.rss_url = rss_url
-        self._last_news_links = set()
+        self.storage = storage  # storage.db.Storage | None
 
-    def fetch_news(self) -> List[Dict]:
+    def fetch_news(self, skip_sent: bool = False) -> List[Dict]:
         try:
             feed = feedparser.parse(self.rss_url)
         except Exception as e:
@@ -41,10 +42,20 @@ class SevSUParser:
 
         logger.info(f"[SevSUParser] Найдено новостей в RSS: {len(feed.entries)}")
 
+        # Если нужно отбросить уже разосланные — читаем один раз
+        sent_links = set()
+        if skip_sent and self.storage is not None:
+            try:
+                sent_links = self.storage.get_sent_news_links()
+            except Exception as e:
+                logger.error(f"[SevSUParser] Не удалось прочитать sent_news: {e}")
+
         news_items = []
         for entry in feed.entries:
             link = entry.get("link", "")
-            if not link or link in self._last_news_links:
+            if not link:
+                continue
+            if skip_sent and link in sent_links:
                 continue
 
             title = entry.get("title", "").strip()
@@ -52,8 +63,6 @@ class SevSUParser:
             date = entry.get("published", "")
             category = entry.get("category", "")
 
-            # Категория в RSS СевГУ длинная: "Институт/Кафедра".
-            # Для бота оставляем только институт.
             if category and "/" in category:
                 category = category.split("/")[0].strip()
 
@@ -65,9 +74,5 @@ class SevSUParser:
                 "category": category,
                 "source": "СевГУ",
             })
-
-        # Запоминаем, чтобы не дублировать
-        for n in news_items:
-            self._last_news_links.add(n["link"])
 
         return news_items
