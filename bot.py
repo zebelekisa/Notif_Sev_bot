@@ -94,6 +94,9 @@ class NotificationBot:
             logger.info("[process_news] Нечего рассылать")
             return
 
+        # ИНВЕРТИРУЕМ СПИСОК: теперь самые старые из новых будут первыми
+        news.reverse()
+
         for item in news[:3]:
             title = item.get("title", "")
             link = item.get("link", "")
@@ -105,19 +108,21 @@ class NotificationBot:
             if category:
                 header += f" · {category}"
 
-            text = f"{header}\n\n**{title}**"
+            # Убрали ** и красиво оформили
+            text = f"{header}\n\n🗓 {date}\n\n{title}"
+            
             if description:
                 text += f"\n\n{description[:300]}"
                 if len(description) > 300:
                     text += "..."
-            if date:
-                text += f"\n\n🗓 {date}"
+            
             if link:
-                text += f"\n🔗 {link}"
+                text += f"\n\n🔗 {link}"
 
             if self.broadcast(text, only_news=True):
                 self.storage.mark_news_sent(link)
                 logger.info(f"Отправлена новость: {title[:60]}")
+                time.sleep(1) # Пауза 1 сек, чтобы ВК отправлял их строго по одной
 
     # ---------- Обработка команд ----------
     def handle_message(self, event):
@@ -207,20 +212,30 @@ class NotificationBot:
 
         # === Новости ===
         if text == "📰 Новости":
-            # Запрашиваем ТОЛЬКО те новости, которых нет в БД
             news = self.sevsu_site.fetch_news(skip_sent=True)
             
             if not news:
                 msg = "Пока новых новостей нет. Все актуальные новости уже показаны."
                 self.send_message(peer_id, msg, keyboard=get_main_keyboard())
             else:
+                # ИНВЕРТИРУЕМ СПИСОК для ручного нажатия тоже
+                news.reverse()
+                
                 for n in news[:3]:
-                    title = n.get('title', '')[:120]
+                    title = n.get('title', '')
                     link = n.get('link', '')
-                    msg = f"📰 Новость СевГУ:\n\n{title}\n{link}"
+                    date = n.get('date', '')
+                    description = n.get('description', '')
+                    
+                    # Красивое оформление без звездочек
+                    msg = f"📰 Новость СевГУ\n\n🗓 {date}\n\n{title}"
+                    if description:
+                        msg += f"\n\n{description[:300]}..."
+                    msg += f"\n\n🔗 {link}"
                     
                     if self.send_message(peer_id, msg, keyboard=get_main_keyboard()):
                         self.storage.mark_news_sent(link)
+                        time.sleep(1) # Пауза между отправками
             return
 
         # === Памятка ===

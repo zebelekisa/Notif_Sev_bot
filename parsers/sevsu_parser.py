@@ -2,6 +2,7 @@
 import re
 import html as html_lib
 import feedparser
+import time
 from typing import List, Dict
 import logging
 
@@ -60,7 +61,12 @@ class SevSUParser:
 
             title = entry.get("title", "").strip()
             description = strip_html(entry.get("description", ""))
-            date = entry.get("published", "")
+            # КРАСИВАЯ ДАТА
+            if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                date = time.strftime('%d.%m.%Y %H:%M', entry.published_parsed)
+            else:
+                date = entry.get("published", "")
+
             category = entry.get("category", "")
 
             if category and "/" in category:
