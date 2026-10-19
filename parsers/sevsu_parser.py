@@ -3,32 +3,26 @@ import re
 import html as html_lib
 import feedparser
 import time
+import datetime
+from datetime import timezone
 from typing import List, Dict
 import logging
 
+from config import NEWS_MAX_AGE_HOURS
+
 logger = logging.getLogger(__name__)
 
-
 def strip_html(text: str) -> str:
-    """Убирает HTML-теги и раскодирует сущности (&nbsp;, &amp; и т.п.)."""
     if not text:
         return ""
-    # Раскодируем HTML-сущности
     text = html_lib.unescape(text)
-    # Убираем теги
     text = re.sub(r"<[^>]+>", "", text)
-    # Сжимаем пробелы
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
+    return re.sub(r"\s+", " ", text).strip()
 
 class SevSUParser:
-    """Парсер новостей СевГУ через RSS-ленту Битрикса."""
-
-    def __init__(self, rss_url: str = "https://www.sevsu.ru/novosti/rss.php?section=0",
-                 storage=None):
+    def __init__(self, rss_url: str, storage=None):
         self.rss_url = rss_url
-        self.storage = storage  # storage.db.Storage | None
+        self.storage = storage
 
     def fetch_news(self, skip_sent: bool = False) -> List[Dict]:
         try:
@@ -38,37 +32,41 @@ class SevSUParser:
             return []
 
         if not feed.entries:
-            logger.warning(f"[SevSUParser] RSS пуст или недоступен: {self.rss_url}")
             return []
 
-        logger.info(f"[SevSUParser] Найдено новостей в RSS: {len(feed.entries)}")
-
-        # Если нужно отбросить уже разосланные — читаем один раз
         sent_links = set()
         if skip_sent and self.storage is not None:
             try:
                 sent_links = self.storage.get_sent_news_links()
             except Exception as e:
-                logger.error(f"[SevSUParser] Не удалось прочитать sent_news: {e}")
+                logger.error(f"Ошибка чтения БД: {e}")
 
+        now_utc = datetime.datetime.now(timezone.utc)
         news_items = []
+        
         for entry in feed.entries:
             link = entry.get("link", "")
-            if not link:
+            
+            # Пропускаем, если нет ссылки или она уже отправлена
+            if not link or (skip_sent and link in sent_links):
                 continue
-            if skip_sent and link in sent_links:
-                continue
+
+            # --- ФИЛЬТР ПО ДАТЕ ---
+            if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                pub_time_utc = datetime.datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+                age = now_utc - pub_time_utc
+                
+                # Если новость старше разрешенного возраста — пропускаем
+                if age > datetime.timedelta(hours=NEWS_MAX_AGE_HOURS):
+                    continue
+            # -----------------------
 
             title = entry.get("title", "").strip()
             description = strip_html(entry.get("description", ""))
-            # КРАСИВАЯ ДАТА
-            if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                date = time.strftime('%d.%m.%Y %H:%M', entry.published_parsed)
-            else:
-                date = entry.get("published", "")
+            
+            date = time.strftime('%d.%m.%Y %H:%M', entry.published_parsed) if hasattr(entry, 'published_parsed') else ""
 
             category = entry.get("category", "")
-
             if category and "/" in category:
                 category = category.split("/")[0].strip()
 
@@ -78,7 +76,6 @@ class SevSUParser:
                 "description": description,
                 "date": date,
                 "category": category,
-                "source": "СевГУ",
             })
 
         return news_items
