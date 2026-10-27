@@ -39,6 +39,11 @@ class Storage:
                 link TEXT UNIQUE,
                 sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+            
+            CREATE TABLE IF NOT EXISTS menu_messages (
+                peer_id INTEGER PRIMARY KEY,
+                message_id INTEGER
+            );
         """)
         self.conn.commit()
 
@@ -54,14 +59,11 @@ class Storage:
         self.conn.commit()
 
     # --- подписчики ---
-    def add_subscriber(self, user_id: int, peer_id: int, is_starosta: bool = False,
-                       faculty: str = "", group_name: str = ""):
+    def add_subscriber(self, user_id: int, peer_id: int):
         cur = self.conn.cursor()
         cur.execute("""
-            INSERT OR REPLACE INTO subscribers
-            (user_id, peer_id, is_starosta, faculty, group_name)
-            VALUES (?, ?, ?, ?, ?)
-        """, (user_id, peer_id, int(is_starosta), faculty, group_name))
+            INSERT OR IGNORE INTO subscribers (user_id, peer_id) VALUES (?, ?)
+        """, (user_id, peer_id))
         self.conn.commit()
 
     def get_subscribers(self, only_alerts: bool = False, only_news: bool = False):
@@ -112,3 +114,17 @@ class Storage:
         cur.execute("DELETE FROM sent_news")
         self.conn.commit()
         return cur.rowcount
+
+    # --- меню настроек ---
+    def set_menu_message(self, peer_id: int, message_id: int):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO menu_messages (peer_id, message_id) VALUES (?, ?)", 
+            (peer_id, message_id)
+        )
+        self.conn.commit()
+
+    def get_menu_message(self, peer_id: int) -> int:
+        cur = self.conn.cursor()
+        cur.execute("SELECT message_id FROM menu_messages WHERE peer_id = ?", (peer_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
