@@ -7,7 +7,7 @@ from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
 from apscheduler.schedulers.background import BackgroundScheduler
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 
-from config import VK_TOKEN, GROUP_ID, BROADCAST_PEER_ID, ALERT_KEYWORDS, PHOTO_ALERT_ID, PHOTO_CLEAR_ID, CHECK_INTERVAL_MINUTES
+from config import VK_TOKEN, GROUP_ID, BROADCAST_PEER_ID, ALERT_KEYWORDS, PHOTO_ALERT_ID, PHOTO_CLEAR_ID, CHECK_INTERVAL_MINUTES, NEWS_CHECK_INTERVAL_MINUTES
 from parsers.sevsu_parser import SevSUParser
 from parsers.governor_parser import GovernorParser
 from storage.db import Storage
@@ -59,17 +59,35 @@ class NotificationBot:
         self.sevsu_site = SevSUParser("https://www.sevsu.ru/novosti/rss.php?section=0", storage=self.storage)
         self.governor_parser = GovernorParser()
 
-    def send_message(self, peer_id: int, text: str, keyboard: dict = None) -> bool:
+    def send_message(self, peer_id: int, text: str, keyboard: dict = None) -> int:
         try:
-            self.vk.messages.send(
+            res = self.vk.messages.send(
                 peer_id=peer_id, message=text,
                 keyboard=keyboard if keyboard is not None else get_empty_keyboard(),
                 random_id=int(time.time() * 1000),
             )
-            return True
+            
+            # Безопасное получение ID сообщения
+            if isinstance(res, dict):
+                return res.get('message_id')
+            elif isinstance(res, list):
+                return res[0]
+            return res
+            
         except Exception as e:
-            logger.error(f"Ошибка отправки в {peer_id}: {e}")
-            return False
+            logger.error(f"Ошибка отправки: {e}")
+            return None  # Если ошибка, возвращаем None
+
+    def edit_message(self, peer_id: int, msg_id: int, text: str, keyboard: dict = None):
+        if not msg_id:
+            return
+        try:
+            self.vk.messages.edit(
+                peer_id=peer_id, message_id=msg_id, message=text,
+                keyboard=keyboard if keyboard is not None else get_empty_keyboard()
+            )
+        except Exception as e:
+            logger.error(f"Ошибка редактирования: {e}")
 
     def send_to_all(self, text: str, only_alerts: bool = False, only_news: bool = False):
         """Рассылка всем подписчикам из базы."""
@@ -123,36 +141,39 @@ class NotificationBot:
             time.sleep(1)
 
     def process_alerts(self):
-        """Фоновая проверка тревог у губернатора."""
         logger.info("Проверка тревог...")
         posts = self.governor_parser.fetch_all_recent(limit=5)
-        # Идем от старых к новым, чтобы не пропустить отбой после тревоги
         posts.reverse() 
         
         for p in posts:
             post_id = str(p.get("id"))
             if self.storage.is_alert_sent(post_id):
-                continue # Уже отправляли
+                continue
 
-            post_text = p.get("text", "").lower()
-            post_photos = p.get("photos", [])
-            post_date = p.get("date")
+            text = p.get("text", "").lower().strip()
+            photos = p.get("photos", [])
+            
+            # 1. Отбой: есть слово "отбой" ИЛИ только картинка без текста
+            is_clear = "отбой" in text or (len(photos) > 0 and len(text) == 0)
+            
+            # 2. Учения: есть слова "учения" или "тренировка"
+            is_drill = "учени" in text or "тренировк" in text
+            
+            # 3. Тревога: есть ключевые слова (из config.py) и это не отбой/учения
+            is_alert = any(kw in text for kw in ALERT_KEYWORDS) and not is_clear and not is_drill
 
-            # Проверяем тревогу
-            is_alert = PHOTO_ALERT_ID in post_photos or any(kw in post_text for kw in ALERT_KEYWORDS if "отбой" not in kw)
-            # Проверяем отбой
-            is_clear = PHOTO_CLEAR_ID in post_photos or "отбой воздушной тревоги" in post_text
-
-            if is_alert:
-                msg = f"🚨 **ВНИМАНИЕ! ВОЗДУШНАЯ ТРЕВОГА!**\n\n🕒 {post_date}\n\nПроследуйте в укрытие!\n\n🔗 Ссылка: https://vk.com/wall-{p.get('owner_id', '')}_{post_id}"
+            if is_clear:
+                msg = f"✅ ОТБОЙ ВОЗДУШНОЙ ТРЕВОГИ\n\n🕒 {p.get('date')}"
                 self.send_to_all(msg, only_alerts=True)
                 self.storage.mark_alert_sent(post_id)
-                logger.info(f"Отправлена ТРЕВОГА: {post_id}")
-            elif is_clear:
-                msg = f"✅ **ОТБОЙ ВОЗДУШНОЙ ТРЕВОГИ**\n\n🕒 {post_date}"
+            elif is_drill:
+                msg = f"⚠️ УЧЕНИЯ (НЕ ТРЕВОГА)\n\n🕒 {p.get('date')}\n\nСохраняйте спокойствие."
                 self.send_to_all(msg, only_alerts=True)
                 self.storage.mark_alert_sent(post_id)
-                logger.info(f"Отправлен ОТБОЙ: {post_id}")
+            elif is_alert:
+                msg = f"🚨 ВНИМАНИЕ! ВОЗДУШНАЯ ТРЕВОГА!\n\n🕒 {p.get('date')}\n\nПроследуйте в укрытие!\n\n🔗 https://vk.com/wall-{p.get('owner_id', '')}_{post_id}"
+                self.send_to_all(msg, only_alerts=True)
+                self.storage.mark_alert_sent(post_id)
 
     # ---------- Обработка команд ----------
     def handle_message(self, event):
@@ -165,56 +186,62 @@ class NotificationBot:
             self.send_message(peer_id, "👋 Привет! Я бот уведомлений СевГУ.\n\nВыберите действие:", keyboard=get_main_keyboard())
             return
 
-        # === КНОПКА СТАТУСА ТРЕВОГИ (Оживлена) ===
+        # === КНОПКА СТАТУСА ТРЕВОГИ ===
         if text == "🚨 Статус тревоги":
-            self.send_message(peer_id, "⏳ Проверяю оперативную обстановку...")
-            # Берем 5 последних постов, чтобы найти актуальный статус
+            msg_id = self.send_message(peer_id, "⏳ Проверяю оперативную обстановку...")
             posts = self.governor_parser.fetch_all_recent(limit=5)
-            status = "✅ Воздушная тревога не объявлена.\n\n(Нет свежих данных о тревоге)"
+            status = "✅ Воздушная тревога не объявлена."
             
             if posts:
-                for p in posts: # Идем от новых к старым
-                    p_text = p.get("text", "").lower()
+                for p in posts: # от новых к старым
+                    p_text = p.get("text", "").lower().strip()
                     p_photos = p.get("photos", [])
                     
-                    if PHOTO_ALERT_ID in p_photos or any(kw in p_text for kw in ALERT_KEYWORDS if "отбой" not in kw):
-                        status = f"🚨 **ВОЗДУШНАЯ ТРЕВОГА!**\n\nОбъявлена: {p.get('date')}\n\n_Спуститесь в укрытие!_"
+                    is_clear = "отбой" in p_text or (len(p_photos) > 0 and len(p_text) == 0)
+                    is_drill = "учени" in p_text or "тренировк" in p_text
+                    is_alert = any(kw in p_text for kw in ALERT_KEYWORDS) and not is_clear and not is_drill
+                    
+                    if is_clear:
+                        status = f"✅ ОТБОЙ ТРЕВОГИ.\n\nДата: {p.get('date')}"
                         break
-                    elif PHOTO_CLEAR_ID in p_photos or "отбой воздушной тревоги" in p_text:
-                        status = f"✅ **ОТБОЙ ТРЕВОГИ.**\n\nДата: {p.get('date')}"
+                    elif is_drill:
+                        status = f"⚠️ ИДУТ УЧЕНИЯ.\n\nДата: {p.get('date')}"
                         break
-            self.send_message(peer_id, status, keyboard=get_main_keyboard())
+                    elif is_alert:
+                        status = f"🚨 ВОЗДУШНАЯ ТРЕВОГА!\n\nОбъявлена: {p.get('date')}\n\nСпуститесь в укрытие!"
+                        break
+            
+            self.edit_message(peer_id, msg_id, status, get_main_keyboard())
             return
 
-        # === ТЕСТ ТРЕВОГ ===
+        # === ТЕСТОВЫЙ РЕЖИМ ТРЕВОГ ===
         if text.lower() == "/test_alerts" or text == "🧪 Тест тревог (Губернатор)":
-            self.send_message(peer_id, "⏳ Загружаю посты губернатора...")
+            msg_id = self.send_message(peer_id, "⏳ Загружаю посты губернатора...")
             posts = self.governor_parser.fetch_all_recent(limit=30)
             if not posts:
                 self.send_message(peer_id, "⚠️ Не удалось загрузить посты.")
                 return
                 
             alerts_found = 0
-            report = ["🧪 РЕЗУЛЬТАТЫ ТЕСТА ТРЕВОГ:\n"] 
-            for p in posts:
-                post_text = p.get("text", "")
-                post_photos = p.get("photos", [])
-                matched = [kw for kw in ALERT_KEYWORDS if kw.lower() in post_text.lower()]
-                has_alert_photo = PHOTO_ALERT_ID in post_photos
-                has_clear_photo = PHOTO_CLEAR_ID in post_photos
-                
-                if matched or has_alert_photo or has_clear_photo:
-                    alerts_found += 1
-                    triggers = []
-                    if matched: triggers.append(f"текст ({', '.join(matched)})")
-                    if has_alert_photo: triggers.append("картинка (Тревога)")
-                    if has_clear_photo: triggers.append("картинка (Отбой)")
-                    short_text = post_text[:80].replace("\n", " ") or "[Только картинка]"
-                    report.append(f"🚨 [{p.get('date')}] (ID: {p.get('id')})\n🔍 Триггер: {', '.join(triggers)}\n📝 {short_text}...\n")
+            report = ["🧪 РЕЗУЛЬТАТЫ ТЕСТА:\n"] 
             
-            if alerts_found == 0: report.append("✅ Тревог не найдено.")
-            else: report.append(f"Всего найдено: {alerts_found}")
-            self.send_message(peer_id, "\n".join(report)[:4000], keyboard=get_main_keyboard())
+            for p in posts:
+                p_text = p.get("text", "").lower().strip()
+                p_photos = p.get("photos", [])
+                
+                is_clear = "отбой" in p_text or (len(p_photos) > 0 and len(p_text) == 0)
+                is_drill = "учени" in p_text or "тренировк" in p_text
+                is_alert = any(kw in p_text for kw in ALERT_KEYWORDS) and not is_clear and not is_drill
+
+                if is_alert or is_clear or is_drill:
+                    alerts_found += 1
+                    status = "🚨 ТРЕВОГА" if is_alert else ("✅ ОТБОЙ" if is_clear else "⚠️ УЧЕНИЯ")
+                    short_text = p_text[:50].replace("\n", " ") or "[Только картинка = отбой]"
+                    
+                    report.append(f"{status} [{p.get('date')}]\n📝 {short_text}...\n")
+            
+            if alerts_found == 0: report.append("✅ Ничего не найдено.")
+            self.edit_message(peer_id, msg_id, "\n".join(report)[:4000], get_main_keyboard())
             return
 
         # === НОВОСТИ ===
@@ -236,7 +263,7 @@ class NotificationBot:
 
         # === ПАМЯТКА ===
         if text == "📋 Памятка":
-            memo = ("📋 **Памятка при воздушной тревоге**\n\n1. Не паникуйте.\n2. Проследуйте в укрытие.\n"
+            memo = ("📋 Памятка при воздушной тревоге\n\n1. Не паникуйте.\n2. Проследуйте в укрытие.\n"
                     "3. Если укрытия нет — помещение без окон.\n4. Отойдите от окон.\n5. Не пользуйтесь лифтом.\n"
                     "6. Возьмите документы, телефон, воду.\n7. Дождитесь отбоя.")
             self.send_message(peer_id, memo, keyboard=get_main_keyboard())
@@ -282,13 +309,13 @@ class NotificationBot:
     # ---------- Запуск ----------
     def run(self):
         scheduler = BackgroundScheduler()
-        # Проверка тревог каждые 2 минуты (или как в конфиге)
+        # Проверка тревог каждые 2 минуты (из конфига)
         scheduler.add_job(self.process_alerts, "interval", minutes=CHECK_INTERVAL_MINUTES)
-        # Проверка новостей каждые 30 минут
-        scheduler.add_job(self.process_news, "interval", minutes=30)
+        # Проверка новостей каждые 5 минут (из конфига)
+        scheduler.add_job(self.process_news, "interval", minutes=NEWS_CHECK_INTERVAL_MINUTES) # <--- ИЗМЕНИЛИ ЗДЕСЬ
         scheduler.start()
 
-        logger.info("Бот запущен. Фоновая проверка тревог и новостей активна.")
+        logger.info(f"Бот запущен. Тревоги: каждые {CHECK_INTERVAL_MINUTES} мин, Новости: каждые {NEWS_CHECK_INTERVAL_MINUTES} мин.")
         for event in self.longpoll.listen():
             if event.type == VkBotEventType.MESSAGE_NEW:
                 try:
