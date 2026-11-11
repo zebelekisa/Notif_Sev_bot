@@ -2,68 +2,48 @@
 import logging
 import vk_api
 import os
+from datetime import datetime
 from dotenv import load_dotenv
-from datetime import datetime  # <--- ДОБАВИЛИ ИМПОРТ ДЛЯ ДАТЫ
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 class GovernorParser:
     def __init__(self):
-        # Берем сервисный ключ из .env
         self.token = os.getenv("VK_SERVICE_TOKEN")
-        if not self.token:
-            logger.error("VK_SERVICE_TOKEN не задан в .env! Парсер губернатора не будет работать.")
-            self.vk = None
-        else:
-            # Авторизуемся с сервисным ключом
-            self.vk_session = vk_api.VkApi(token=self.token)
-            self.vk = self.vk_session.get_api()
-            
+        self.vk = vk_api.VkApi(token=self.token).get_api() if self.token else None
         self.domain = "razvozhaev_m"
 
-    def fetch_posts(self, count: int = 30) -> list:
-        """Возвращает список постов со стены через официальный API."""
-        if not self.vk:
-            return []
-
+    def fetch_all_recent(self, limit: int = 10) -> list:
+        if not self.vk: return []
         try:
-            # Запрашиваем посты со стены
-            response = self.vk.wall.get(
-                domain=self.domain,
-                count=count,
-                filter="all",
-                v="5.199" # Актуальная версия API
-            )
-            return response.get("items", [])
+            res = self.vk.wall.get(domain=self.domain, count=limit, filter="all", v="5.199")
+            raw_posts = res.get("items", [])
         except Exception as e:
-            logger.error(f"Ошибка wall.get для {self.domain}: {e}")
+            logger.error(f"Ошибка wall.get: {e}")
             return []
 
-    def fetch_all_recent(self, limit: int = 30) -> list:
-        """Возвращает посты в формате, который ожидает бот."""
-        raw_posts = self.fetch_posts(count=limit)
-        
         posts = []
         for p in raw_posts:
-            # Конвертируем Unix timestamp в строку "ДД.ММ.ГГГГ ЧЧ:ММ"
-            timestamp = p.get("date", 0)
-            dt = datetime.fromtimestamp(timestamp).strftime('%d.%m.%Y %H:%M')
-
-            # ДОБАВЛЯЕМ ПОИСК КАРТИНОК
-            photo_ids = []
+            dt = datetime.fromtimestamp(p.get("date", 0)).strftime('%d.%m.%Y %H:%M')
+            
+            # Ищем лучшую картинку для OCR (берем размер 'x' или 'z', они оптимальны по размеру)
+            image_url = None
             for attachment in p.get("attachments", []):
                 if attachment.get("type") == "photo":
-                    photo = attachment.get("photo", {})
-                    owner_id = photo.get("owner_id")
-                    photo_id = photo.get("id")
-                    if owner_id and photo_id:
-                        photo_ids.append(f"{owner_id}_{photo_id}")
+                    sizes = attachment.get("photo", {}).get("sizes", [])
+                    # Сортируем по ширине и берем среднюю (около 600-800px), чтобы OCR работал быстро
+                    sizes = sorted([s for s in sizes if s.get('width', 0) > 0], key=lambda x: x['width'])
+                    if sizes:
+                        # Берем предпоследний размер (обычно 600-800px)
+                        best_size = sizes[-2] if len(sizes) > 1 else sizes[0]
+                        image_url = best_size.get("url")
+                        break # Берем только первую картинку
+
             posts.append({
                 "id": p.get("id"),
-                "text": p.get("text", ""),
-                "date": p.get("date"),
-                "date": dt,  # <--- Теперь тут красивая строка
-                "photos": photo_ids, # <--- Передаем ID картинок в бота
+                "text": p.get("text", "").strip(),
+                "date": dt,
+                "image_url": image_url,
             })
         return posts

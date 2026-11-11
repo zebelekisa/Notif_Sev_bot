@@ -5,3 +5,5 @@ lxml
 feedparser
 apscheduler
 python-dotenv
+pytesseract
+Pillow
