@@ -3,8 +3,10 @@ import logging
 import time
 import requests
 import pytesseract
-# Указываем точный путь к программе
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+import platform  # <--- ДОБАВЛЯЕМ ЭТОТ ИМПОРТ
+# Проверяем ОС: если Windows — указываем путь, если Linux (Bothost) — оставляем по умолчанию
+if platform.system() == "Windows":
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 from PIL import Image
 from io import BytesIO
 
@@ -101,14 +103,14 @@ class NotificationBot:
         """Скачивает картинку и распознает текст (OCR)."""
         if not url: return ""
         try:
-            # Скачиваем картинку
-            img_data = requests.get(url, timeout=5).content
+            # Добавляем User-Agent (ВК охотнее отдает картинки) и увеличиваем таймаут
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            img_data = requests.get(url, headers=headers, timeout=(10, 30)).content
+            
             img = Image.open(BytesIO(img_data))
-            
-            # Оптимизация: уменьшаем картинку, если она огромная, для скорости OCR
+            # Оптимизация: уменьшаем картинку, если она огромная
             img.thumbnail((1000, 1000))
-            
-            # Конвертируем в ч/б для лучшего распознавания контрастного текста
+            # Конвертируем в ч/б
             img = img.convert('L')
             
             # Распознаем русский текст
